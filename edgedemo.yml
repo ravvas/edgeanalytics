@@ -1,0 +1,1298 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: >-
+  Cloudfront Template: Creates cloudfront for Edge Analytics End to end demo
+
+Parameters:
+
+  VPCCIDR:
+    AllowedValues:
+    - 10.10.0.0/16
+    Default: 10.10.0.0/16
+    Description: CIDR Block for VPC
+    Type: String
+
+  PublicSubnetParam:
+    AllowedValues:
+    - 10.10.10.0/24
+    Default: 10.10.10.0/24
+    Description: Public Subnet
+    Type: String
+
+  OriginPath:
+    Default: iot-dashboard
+    Description: Path in s3 bucket where UI distro files will be stored 
+    Type: String
+
+  EmailID:
+    Default : ravvas@rediffmail.com
+    Description: 'Email to which the credentails will be sent'
+    Type: String
+
+  UserID:
+    Default: edgedemo
+    Description: 'User ID to login to the demo'
+    Type: String
+
+
+  KeyName:
+    Default: devsimulator
+    Description: ssh keypair name required to login to Device Simulator
+    Type: String
+
+  DeviceName:
+    Default: stamping
+    Description: Device thing Name in IoT Core
+    Type: String
+
+  TopicNameStats:
+    Default: data/stats
+    Description: 'permission for simulator to subscribed to a particular topic '
+    Type: String
+
+  TopicNameTelemetry:
+    Default: data/stamping
+    Description: MQTT topic to where telemetry data will be pushed
+    Type: String
+
+
+  EdgeDemoESDomain:
+    Default: elastic1
+    Description: Elasticsearch Domain Name
+    Type: String
+
+
+Mappings:
+  sourcebucket:
+    us-east-1:
+      bucketname: edgedemoprod
+
+  AmazonLinuxAMI:
+    ap-northeast-1:
+      AMI: ami-a77c30c1
+    ap-southeast-1:
+      AMI: ami-e2adf99e
+    ap-southeast-2:
+      AMI: ami-43874721
+    eu-central-1:
+      AMI: ami-ac442ac3
+    eu-west-1:
+      AMI: ami-3bfab942
+    eu-west-2:
+      AMI: ami-dff017b8
+    sa-east-1:
+      AMI: ami-5339733f
+    us-east-1:
+      AMI: ami-1853ac65
+    us-east-2:
+      AMI: ami-25615740
+    us-west-2:
+      AMI: ami-d874e0a0
+
+
+Resources:
+
+## Network resources : Create VPC, subnets, route tables, security groups  etc. 
+
+#VPC for Device Simulator 
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VPCCIDR
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Edgedemo
+
+# Create Internet gateway    
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Edgedemo
+
+# Attach Internet Gateway to VPC    
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+# Public Subnet for Device Simulator
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select 
+        - 0 
+        - !GetAZs
+      CidrBlock: !Ref PublicSubnetParam
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC 
+
+
+# Route Table for Public Subnet 
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC 
+
+# Public Route 
+  PublicRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicRouteTable
+
+
+# Attach Route table to Public subnet 
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet
+
+
+# Create Elasticsearch domain to store steps data
+  ElasticsearchDomain:
+    Type: AWS::Elasticsearch::Domain
+    Properties:
+      AccessPolicies:
+        Statement:
+        - Action: es:*
+          Effect: Allow
+          Principal:
+            AWS: arn:aws:iam::641026638063:root          
+          Resource: !Sub 'arn:${AWS::Partition}:es:${AWS::Region}:${AWS::AccountId}:${EdgeDemoESDomain}/*'
+        Version: '2012-10-17'
+      AdvancedOptions:
+        rest.action.multi.allow_explicit_index: 'true'
+      # DomainName:
+      #   Ref: EdgeDemoESDomain
+      EBSOptions:
+        EBSEnabled: true
+        Iops: 0
+        VolumeSize: 20
+        VolumeType: gp2
+      ElasticsearchClusterConfig:
+        DedicatedMasterEnabled: false
+        InstanceCount: '2'
+        InstanceType: t2.micro.elasticsearch
+        ZoneAwarenessEnabled: false
+      ElasticsearchVersion: '2.3'
+      SnapshotOptions:
+        AutomatedSnapshotStartHour: '0'
+
+
+
+## S3 bucket 
+  DataBucket:
+    Type: AWS::S3::Bucket
+
+# Cloudfront Origin Access Identity 
+  cloudfrontoriginaccessidentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: edgedemo2
+
+# Bucket policy for S3 Bucket that data from public can be accessed thru cloudfront only
+  DataBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DataBucket
+      PolicyDocument:
+        Statement:
+        - Action:
+          - s3:GetObject
+          Effect: Allow
+          Principal:
+            AWS: !Sub 'arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${cloudfrontoriginaccessidentity}'
+          Resource: !Sub 'arn:aws:s3:::${DataBucket}/*'
+
+
+  EdgedemoDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: Edge Demo cloud front distribution
+        DefaultCacheBehavior:
+          AllowedMethods:
+          - DELETE
+          - GET
+          - HEAD
+          - OPTIONS
+          - PATCH
+          - POST
+          - PUT
+          ForwardedValues:
+            Cookies:
+              Forward: none
+            QueryString: false
+          TargetOriginId: !Sub S3-${DataBucket}/${OriginPath} 
+          TrustedSigners: []
+          ViewerProtocolPolicy: allow-all
+        DefaultRootObject: index.html
+        Enabled: true
+        Origins:
+        - DomainName: !Sub ${DataBucket}.s3.amazonaws.com
+          Id: !Sub S3-${DataBucket}/${OriginPath}
+          OriginPath: !Sub /${OriginPath}
+          S3OriginConfig:
+            OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${cloudfrontoriginaccessidentity}
+        PriceClass: PriceClass_All
+        Restrictions:
+          GeoRestriction:
+            RestrictionType: none
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+# Rest API creation 
+
+  ApiGatewayRestApi:
+    Properties:
+      EndpointConfiguration:
+        Types:
+        - EDGE
+      Name: IotUiApi
+    Type: AWS::ApiGateway::RestApi
+## User Pools and Identity Pools
+
+
+# Add Resource to API 
+
+  ApiGatewayResourcePolicy:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+      PathPart: policy
+      RestApiId: !Ref ApiGatewayRestApi
+
+
+# Add connect to parent 
+  ApiGatewayResourcePolicyAttachconnect:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !Ref ApiGatewayResourcePolicy
+      PathPart: connect
+      RestApiId: !Ref ApiGatewayRestApi
+
+
+# Options Method 
+  ApiGatewayMethodPolicyAttachconnectOptions:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      AuthorizationType: NONE
+      HttpMethod: OPTIONS
+      Integration:
+        IntegrationResponses:
+        - ResponseParameters:
+            method.response.header.Access-Control-Allow-Credentials: '''false'''
+            method.response.header.Access-Control-Allow-Headers: '''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token,X-Amz-User-Agent'''
+            method.response.header.Access-Control-Allow-Methods: '''OPTIONS,POST'''
+            method.response.header.Access-Control-Allow-Origin: '''*'''
+          ResponseTemplates:
+            application/json: ''
+          StatusCode: '200'
+        RequestTemplates:
+          application/json: '{statusCode:200}'
+        Type: MOCK
+      MethodResponses:
+      - ResponseModels: {}
+        ResponseParameters:
+          method.response.header.Access-Control-Allow-Credentials: true
+          method.response.header.Access-Control-Allow-Headers: true
+          method.response.header.Access-Control-Allow-Methods: true
+          method.response.header.Access-Control-Allow-Origin: true
+        StatusCode: '200'
+      RequestParameters: {}
+      ResourceId: !Ref ApiGatewayResourcePolicyAttachconnect
+      RestApiId: !Ref ApiGatewayRestApi
+
+
+# Post Method
+  ApiGatewayMethodPolicyAttachconnectPost:
+    Properties:
+      ApiKeyRequired: false
+      AuthorizationType: AWS_IAM
+      HttpMethod: POST
+      Integration:
+        IntegrationHttpMethod: POST
+        Type: AWS_PROXY
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AttachIotUiWssPolicyFunction.Arn}/invocations'
+      MethodResponses: []
+      RequestParameters: {}
+      ResourceId:
+        Ref: ApiGatewayResourcePolicyAttachconnect
+      RestApiId: !Ref ApiGatewayRestApi
+    Type: AWS::ApiGateway::Method
+
+
+
+# API Deployment 
+  ApiGatewayDeployment1517869070382:
+    DependsOn:
+    - ApiGatewayMethodPolicyAttachconnectPost
+    Properties:
+      RestApiId: !Ref ApiGatewayRestApi
+      StageName: prod
+    Type: AWS::ApiGateway::Deployment
+
+# Permissions to call lambda function from API gateway
+  AttachConnectPolicyLambdaPermissionApiGateway:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AttachIotUiWssPolicyFunction.Arn
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub  'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*/*'
+
+
+# Create User Pool 
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      AutoVerifiedAttributes:
+      - email
+      MfaConfiguration: 'OFF'
+      Schema:
+      - AttributeDataType: String
+        Name: email
+        Required: true
+      UserPoolName: IotUiUserPool
+
+
+# Create client for Ui Application 
+  ReactAppClient:
+    Properties:
+      GenerateSecret: false
+      RefreshTokenValidity: 200
+      UserPoolId: !Ref UserPool
+    Type: AWS::Cognito::UserPoolClient
+
+# Create user Id called "edgedemo". Credentials will be sent to Email mentioned in the parameter EmailID
+
+  AdminUser:
+    Properties:
+      UserAttributes:
+      - Name: email
+        Value: !Ref EmailID
+      UserPoolId: !Ref UserPool
+      Username: !Ref UserID
+    Type: AWS::Cognito::UserPoolUser
+
+# Create Identity pool correspondong to User Pool
+
+  IdentityPool:
+    Type: AWS::Cognito::IdentityPool
+    Properties:
+      AllowUnauthenticatedIdentities: false
+      CognitoIdentityProviders:
+      - ClientId: !Ref ReactAppClient
+        ProviderName: !GetAtt UserPool.ProviderName
+      IdentityPoolName: IotUiIdentityPool
+
+
+# Role for Identity pool
+
+  IdentityPoolAuthRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRoleWithWebIdentity
+          Condition:
+            ForAnyValue:StringLike:
+              cognito-identity.amazonaws.com:amr: authenticated
+            StringEquals:
+              cognito-identity.amazonaws.com:aud:
+                Ref: IdentityPool
+          Effect: Allow
+          Principal:
+            Federated: cognito-identity.amazonaws.com
+        Version: '2012-10-17'
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/AWSIoTDataAccess
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - execute-api:Invoke
+            Effect: Allow
+            Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/*'
+          Version: '2012-10-17'
+        PolicyName: IotUiInvokeApiGateway1
+    Type: AWS::IAM::Role
+
+# Attach Role for Identity pool 
+  IdentityPoolRoleAttachment:
+    Type: AWS::Cognito::IdentityPoolRoleAttachment
+    Properties:
+      IdentityPoolId: !Ref IdentityPool
+      Roles:
+        authenticated: !GetAtt IdentityPoolAuthRole.Arn
+
+
+## Lambda Functions 
+
+# Lambda function to attach IoT Policy to cogito user ID 
+  AttachIotUiWssPolicyFunction:
+    Properties:
+      Code:
+        S3Bucket: !FindInMap [sourcebucket,!Ref AWS::Region,bucketname]
+        S3Key: attachIotUiWssPolicy.zip
+     #FunctionName: attachIotUiWssPolicy
+      Handler: index.handler
+      Environment:
+        Variables:
+          policyName: !Ref ConnectPolicy
+      MemorySize: 1024
+      Role: !GetAtt AttachIotUiWssPolicyRole.Arn
+      Runtime: nodejs12.x
+      Timeout: 6
+    Type: AWS::Lambda::Function
+
+# Ability to call lambda function from cognito
+  AttachIotUiWssPolicyFunctionPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt AttachIotUiWssPolicyFunction.Arn
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt UserPool.Arn
+
+
+#  Log group for Attach policy lambda function   
+  AttachIotUiWssPolicyLogGroup:
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AttachIotUiWssPolicyFunction}'
+    Type: AWS::Logs::LogGroup
+
+   # Role for Attach Poliy Lambda Function 
+  AttachIotUiWssPolicyRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogStream
+            Effect: Allow
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*'
+          - Action:
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*' 
+          - Action:
+            - iot:AttachPrincipalPolicy
+            - iot:DetachPrincipalPolicy
+            - iot:CreatePolicy
+            Effect: Allow
+            Resource:
+            - '*'
+          Version: '2012-10-17'
+        PolicyName: AttachIotUiWssPolicy
+    Type: AWS::IAM::Role
+
+
+  ConnectPolicy:
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action:
+          - iot:Connect
+          Effect: Allow
+          Resource: !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:*'
+        - Action:
+          - iot:Subscribe
+          Effect: Allow
+          Resource: !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topicfilter/data/*'
+        - Action:
+          - iot:Publish
+          - iot:Receive
+          Effect: Allow
+          Resource: !Sub 'arn:aws:iot:${AWS::Region}:${AWS::AccountId}:topic/data/*'
+        Version: '2012-10-17'
+      # PolicyName: IotUiWssPolicy
+    Type: AWS::IoT::Policy
+
+
+## Custom Function to copy data, fetch IoT End point etc. 
+  CustFnName:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !FindInMap [sourcebucket,!Ref AWS::Region,bucketname]
+        S3Key: custom_resource_fn.zip
+      # FunctionName: custom_resource_fn
+      Handler: customhelper.handler
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Timeout: '30'
+
+# Custom Lambda Execution role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource: arn:aws:logs:*:*:*
+          - Action: es:*     
+            Effect: Allow
+            Resource: arn:aws:logs:*:*:*
+          - Action:
+            - s3:DeleteObject
+            - s3:GetObject
+            - s3:*
+            - s3:PutObject
+            - iot:CreateKeysAndCertificate
+            - iot:UpdateCertificate
+            - iot:DeleteCertificate
+            - iot:DescribeEndpoint            
+            - rekognition:CreateCollection
+            - rekognition:DeleteCollection
+            - codebuild:StartBuild
+            - es:*
+            Effect: Allow
+            Resource: '*'
+          Version: '2012-10-17'
+        PolicyName: CustomLambdaFunctionPolicy
+
+  # UpdateESPolicy:
+  #   Type: Custom::UpdateESPolicy
+  #   Properties:
+  #     AwsRegion: !Ref AWS::Region
+  #     s3Region: !Ref AWS::Region
+  #     Region: !Ref AWS::Region
+  #     DomainName : 'edgedem-elasti-v4niu6k14hey'
+  #     DomainName: !Ref ElasticsearchDomain
+  #     ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+
+
+  LoadTemplateForES:
+    Type: Custom::LoadTemplateForES
+    # DependsOn: UpdateESPolicy
+    Properties:
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+      eshost: !Sub https://${ElasticsearchDomain.DomainEndpoint}
+# Create IoT Certificate 
+
+  IoTCertificationARN:
+    Type: Custom::CreateIoTCertificate
+    Properties:
+      Region: !Ref AWS::Region
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+      bucket: !Ref DataBucket
+      s3Region: !Ref AWS::Region
+      thing_name: !Ref DeviceName
+
+# Lambda Function for generate stats from elastic search 
+  MWCProcessStatsFunction:
+    Properties:
+      Code:
+        S3Bucket:
+          Fn::FindInMap:
+          - sourcebucket
+          - Ref: AWS::Region
+          - bucketname
+        S3Key: process_stats.zip
+      Environment:
+        Variables:
+          bucket:
+            Ref: DataBucket
+          eshost: !GetAtt ElasticsearchDomain.DomainEndpoint
+          host:
+            Fn::GetAtt:
+            - IoTEndPoint
+            - IoTEndPoint
+          pubtopic:
+            Ref: TopicNameStats
+          thing_name:
+            Ref: DeviceName
+      # FunctionName: mwc_process_stats
+      Handler: main.lambda_handler
+      MemorySize: 128
+      Role:
+        Fn::GetAtt:
+        - MWCProcessStasFunRole
+        - Arn
+      Runtime: python3.8
+      Timeout: 100
+    Type: AWS::Lambda::Function
+
+ # Log group for process stats function   
+  AttachMWCProcessStatsFnLogGroup:
+    Properties:
+      LogGroupName: 
+        Fn::Join:
+        - ''
+        - - '/aws/lambda/'
+          - Ref: MWCProcessStatsFunction
+    Type: AWS::Logs::LogGroup
+
+
+# Permissions to invoke Lambda from IoT Rule 
+  MWCPermissionForIoTRuleToLambda:
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Fn::GetAtt:
+        - MWCProcessStatsFunction
+        - Arn
+      Principal: iot.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - WMCIoTTopicRulestepstats
+        - Arn
+    Type: AWS::Lambda::Permission
+
+# Role for process stats function 
+  MWCProcessStasFunRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action:
+            - logs:CreateLogStream
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:logs:'
+                - Ref: AWS::Region
+                - ':'
+                - Ref: AWS::AccountId
+                - :log-group:/aws/lambda/*:*
+                # - Ref : MWCProcessStatsFunction
+                # - :*
+          - Action: s3:GetObject
+            Effect: Allow
+            Resource: '*'
+          - Action: es:*
+            Effect: Allow
+            Resource: '*'
+          - Action:
+            - logs:PutLogEvents
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:logs:'
+                - Ref: AWS::Region
+                - ':'
+                - Ref: AWS::AccountId
+                - :log-group:/aws/lambda/*:*
+                # - Ref : MWCProcessStatsFunction
+                # - :*
+          Version: '2012-10-17'
+        PolicyName: MWCProcessStasFunctionPolicy
+    Type: AWS::IAM::Role
+
+## IoT Thing and Rules 
+
+# Create IoT Thing 
+  IoTThing:
+    Properties:
+      ThingName:
+        Ref: DeviceName
+    Type: AWS::IoT::Thing
+
+# Create IoT Certificate 
+
+  IoTCertificationARN:
+    Properties:
+      Region:
+        Ref: AWS::Region
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+      bucket:
+        Ref: DataBucket
+      s3Region:
+        Ref: AWS::Region
+      thing_name:
+        Ref: DeviceName
+    Type: Custom::CreateIoTCertificate
+
+# Create IoT Policy for Thing ( Device Simulator)
+
+  IoTPolicy:
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Action: iot:Connect
+          Effect: Allow
+          Resource: '*'
+        - Action: iot:Publish
+          Effect: Allow
+          Resource:
+            Fn::Join:
+            - ''
+            - - 'arn:aws:iot:'
+              - Ref: AWS::Region
+              - ':'
+              - Ref: AWS::AccountId
+              - :*
+        Version: '2012-10-17'
+    Type: AWS::IoT::Policy
+
+
+# Attach IoT Policy to Certificate 
+
+
+  IoTPolicyPrincipalAttachment:
+    Properties:
+      PolicyName:
+        Ref: IoTPolicy
+      Principal:
+        Fn::GetAtt:
+        - IoTCertificationARN
+        - certificationARN
+    Type: AWS::IoT::PolicyPrincipalAttachment
+
+
+# Attach certificate to Thing 
+    
+    
+  IoTThingPrincipalAttachment:
+    Properties:
+      Principal:
+        Fn::GetAtt:
+        - IoTCertificationARN
+        - certificationARN
+      ThingName:
+        Ref: IoTThing
+    Type: AWS::IoT::ThingPrincipalAttachment
+
+# IoT Rule to batch statistics and step statistics  IoT Rule 
+
+
+  IoTElasticSearchRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: iot.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: es:ESHttpPut
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:es:'
+                - Ref: AWS::Region
+                - ':'
+                - Ref: AWS::AccountId
+                - :domain/
+                - !Ref ElasticsearchDomain
+                - '/*'
+          Version: '2012-10-17'
+        PolicyName: WMCIoTPolicyforElasticSearch
+    Type: AWS::IAM::Role
+
+
+# IoT Rule to publish step statistics coming from device simulator to elasticsearch
+  WMCIoTTopicRulestepstats:
+    Properties:
+      # RuleName: step_stats
+      TopicRulePayload:
+        Actions:
+        - Elasticsearch:
+            Endpoint: !Sub https://${ElasticsearchDomain.DomainEndpoint}
+            Id: ${newuuid()}
+            Index: edgedemo
+            RoleArn:
+              Fn::GetAtt:
+              - IoTElasticSearchRole
+              - Arn
+            Type: step_stats
+        - Lambda:
+            FunctionArn:
+              Fn::GetAtt:
+              - MWCProcessStatsFunction
+              - Arn
+        AwsIotSqlVersion: '2016-03-23'
+        RuleDisabled: false
+        Sql: SELECT * FROM 'data/batch_step_dt'
+    Type: AWS::IoT::TopicRule
+
+
+# IoT Rule to push Batch Statitistics coming from device simulator to Elastic search 
+  WMCESIoTTopicRule:
+    Properties:
+      # RuleName: batch_stats
+      TopicRulePayload:
+        Actions:
+        - Elasticsearch:
+            Endpoint: !Sub https://${ElasticsearchDomain.DomainEndpoint}
+            Id: ${newuuid()}
+            Index: edgedemo
+            RoleArn:
+              Fn::GetAtt:
+              - IoTElasticSearchRole
+              - Arn
+            Type: batch_stats
+        AwsIotSqlVersion: '2016-03-23'
+        RuleDisabled: false
+        Sql: SELECT * FROM 'data/batch_stats'
+    Type: AWS::IoT::TopicRule
+
+
+# IAM Role for bandwidth rule.
+
+  WMCIoTRepublishRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service: iot.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: iot:Publish
+            Effect: Allow
+            Resource:
+              Fn::Join:
+              - ''
+              - - 'arn:aws:iot:'
+                - Ref: AWS::Region
+                - ':'
+                - Ref: AWS::AccountId
+                - :topic/data/bandwidth
+          Version: '2012-10-17'
+        PolicyName: WMCIoTPolicyforRepublish
+    Type: AWS::IAM::Role
+
+# IoT Rule to republish bandwidth data MQTT topic. Actually its stub data 
+#coming from a machine and did some calculations to get latency value in few milli seconds.
+  WMCIoTTopicRulebandwidth:
+    Properties:
+      # RuleName: bandwidth
+      TopicRulePayload:
+        Actions:
+        - Republish:
+            RoleArn:
+              Fn::GetAtt:
+              - WMCIoTRepublishRole
+              - Arn
+            Topic: data/bandwidth
+        AwsIotSqlVersion: '2016-03-23'
+        RuleDisabled: false
+        Sql: SELECT latency * 500 AS latency,msg_sent * 3 AS msg_sent,size *9 AS size,timestamp
+          FROM 'data/stamping' WHERE machine_id = 'HME204'
+    Type: AWS::IoT::TopicRule
+
+
+# Get IoT End point required for configuration file for UI 
+  IoTEndPoint:
+    Properties:
+      Region: !Ref AWS::Region
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+    Type: Custom::GetIoTEndPoint
+
+
+# Create configuration file required for UI . This will be loaded into s3 bucket that will be used 
+# for input to code build
+
+  CreateConfigFileforUI:
+    Properties:
+      AwsApiGatewayInvokeUrl:
+        Fn::Join:
+        - ''
+        - - https://
+          - Ref: ApiGatewayRestApi
+          - .execute-api.
+          - Ref: AWS::Region
+          - .amazonaws.com/prod
+      AwsIotHost:
+        Fn::GetAtt:
+        - IoTEndPoint
+        - IoTEndPoint
+      AwsRegion:
+        Ref: AWS::Region
+      IdentityPoolId:
+        Ref: IdentityPool
+      LogLevel: DEBUG
+      MqttDebugLevel: ''
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+      UserPoolClientId:
+        Ref: ReactAppClient
+      UserPoolId:
+        Ref: UserPool
+      bucket:
+        Ref: DataBucket
+      file_name: config.txt
+      s3Region:
+        Ref: AWS::Region
+    Type: Custom::CreateConfigFileforUI
+
+
+# Copy code repository from source bucket to data bucket created in this template
+
+  Copys3tos3Object:
+    Properties:
+      AwsRegion: !Ref AWS::Region
+      s3Region:  !Ref AWS::Region
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+      SourceS3Bucket: !FindInMap [sourcebucket,!Ref AWS::Region,bucketname]
+      DestS3Bucket: !Ref DataBucket
+      file_name: iot-dashboard.zip
+    Type: Custom::Copys3tos3Object
+
+## Code Build
+
+  EdgeDemoUICodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      ServiceRole: !Ref CodeBuildRole
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0  
+      Source:
+        Type: S3
+        Location : 
+          Fn::Join:
+          - ''
+          - - 'arn:aws:s3:::'
+            - Fn::FindInMap:
+              - sourcebucket
+              - Ref: AWS::Region
+              - bucketname    
+            - '/iot-dashboard.zip'
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - npm install
+            pre_build:
+              commands:
+                - rm -rf ./src/config/config.json
+                - aws s3 cp s3://${DataBucket}/config.txt ./src/config/config.json
+            build:
+              commands:
+                - npm run build
+            post_build:
+              commands:
+                - aws s3 rm s3://${DataBucket}/${OriginPath} --recursive
+                - aws s3 sync ./build s3://${DataBucket}/${OriginPath}
+      TimeoutInMinutes: 10
+
+
+# Create Elastic Ip address and attach to EC2 instance 
+  WebApp1EIP:
+    DependsOn:
+    # - AttachGateway
+    - WebApp1
+    Properties:
+      Domain: vpc
+      InstanceId:
+        Ref: WebApp1
+    Type: AWS::EC2::EIP  
+
+## Device Simulator 
+
+# Security group for Device Simulator 
+  WA1SecurityGroup:
+    # DependsOn: AttachGateway
+    Properties:
+      GroupDescription: Security Group for Edge Demo Simulator
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: '80'
+        IpProtocol: tcp
+        ToPort: '80'
+      - CidrIp: 0.0.0.0/0
+        FromPort: '443'
+        IpProtocol: tcp
+        ToPort: '443'
+      - CidrIp: 0.0.0.0/0
+        FromPort: '9997'
+        IpProtocol: tcp
+        ToPort: '9997'
+      # - CidrIp: 0.0.0.0/0
+      #   FromPort: '0'
+      #   IpProtocol: udp
+      #   ToPort: '65535'
+      # - CidrIp: 0.0.0.0/0
+      #   FromPort: '8883'
+      #   IpProtocol: udp
+      #   ToPort: '8883'
+      VpcId: !Ref VPC
+    Type: AWS::EC2::SecurityGroup
+
+# Create Wait Handle     
+  WaitHandle01:
+    Properties: {}
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+# Create Wait Condition for EC2
+  WaitCondition01:
+    DependsOn: WebApp1
+    Properties:
+      Handle: !Ref WaitHandle01
+      Timeout: '1800'
+    Type: AWS::CloudFormation::WaitCondition
+
+# EC2 Role for Device simulator. 
+  RootInstanceProfile:
+    DependsOn: RootRole
+    Properties:
+      Path: /
+      Roles:
+      - Ref: RootRole
+    Type: AWS::IAM::InstanceProfile
+  RootRole:
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action:
+          - sts:AssumeRole
+          Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+      - PolicyDocument:
+          Statement:
+          - Action: '*'
+            Effect: Allow
+            Resource: '*'
+          Version: '2012-10-17'
+        PolicyName: root
+    Type: AWS::IAM::Role
+
+
+
+  # Create EC2 instance   
+  WebApp1:
+    DependsOn:
+    - WA1SecurityGroup
+    Properties:
+      IamInstanceProfile:
+        Ref: RootInstanceProfile
+      ImageId:
+        Fn::FindInMap:
+        - AmazonLinuxAMI
+        - Ref: AWS::Region
+        - AMI
+      InstanceType: t2.medium
+      KeyName:
+        Ref: KeyName
+      NetworkInterfaces:
+      - AssociatePublicIpAddress: 'true'
+        DeviceIndex: '0'
+        GroupSet:
+        - Ref: WA1SecurityGroup
+        SubnetId: !Ref PublicSubnet
+      Tags:
+      - Key: Name
+        Value: MWC Simulator
+      - Key: acp-ims-tanium
+        Value: yes
+      - Key: acp-ims-splunk
+        Value: yes 
+      - Key: acp-ims-qualys
+        Value: yes        
+      UserData:
+        Fn::Base64:
+          Fn::Join:
+          - ''
+          - - "#!/bin/bash -ex \n"
+            - "sudo pip install pytz \n"
+            - 'sudo pip install pandas
+
+              '
+            - 'sudo pip install AWSIoTPythonSDK
+
+              '
+            - 'sudo pip install elasticsearch
+
+              '
+            - 'sudo pip install boto3
+
+              '
+            - 'sudo pip install --upgrade awscli
+
+              '
+            - 'cd /home/ec2-user
+
+              '
+            - aws s3 cp s3://
+            - Fn::FindInMap:
+              - sourcebucket
+              - Ref: AWS::Region
+              - bucketname
+            - '/simulator/ . --recursive
+
+              '
+            - 'echo ''thing_name:'
+            - Ref: DeviceName
+            - ''' >> data/config.txt
+
+              '
+            - 'echo ''host:'
+            - Fn::GetAtt:
+              - IoTEndPoint
+              - IoTEndPoint
+            - ''' >> data/config.txt
+
+              '
+            - 'echo ''pubtopic:'
+            - Ref: TopicNameTelemetry
+            - ''' >> data/config.txt
+
+              '
+            - 'echo ''bucket:'
+            - Ref: DataBucket
+            - ''' >> data/config.txt
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME201" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME202" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME203" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME204" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME205" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME206" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME207" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME208" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME209" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'nohup python src/batch_simulation_v3.py -m "HME210" -f 1.0 > /dev/null
+              2>&1 &
+
+              '
+            - 'sudo chmod +x src/check_simulation.sh
+
+              '
+            - 'sh src/add_simulate_cron.sh
+
+              '
+            - /opt/aws/bin/cfn-signal -s true '
+            - Ref: WaitHandle01
+            - '''
+
+              '
+    Type: AWS::EC2::Instance
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Action: ['sts:AssumeRole']
+          Effect: Allow
+          Principal:
+            Service: [codebuild.amazonaws.com]
+        Version: '2012-10-17'
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Action:
+                - 'logs:*'
+                - 's3:*'
+                Effect: Allow
+                Resource: '*'
+
+
+# Start Code build after writing configuration file into s3. 
+
+  StartCodeBuild:
+    DependsOn: CreateConfigFileforUI
+    Properties:
+      ServiceToken: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:${CustFnName}'
+      ProjectName:
+        Ref: EdgeDemoUICodeBuild
+    Type: Custom::StartCodeBuild
+
+Outputs:
+  Edgedemourl:
+    Description: cloudfront URL for edgedemo 
+    Value: !GetAtt EdgedemoDistribution.DomainName
+    Export:
+      Name: !Sub '${AWS::StackName}-Edgedemourl'
+  DataBucket:
+    Description: cloudfront URL for edgedemo 
+    Value: !Ref DataBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-DataBucket'
